@@ -1,0 +1,45 @@
+name: Update Spotify Playlists
+
+on:
+  workflow_dispatch:
+    inputs:
+      csv_path:
+        description: 'Optional: path to CSV file in repo (overrides CSV_PATH secret)'
+        required: false
+  schedule:
+    - cron: '0 8 * * *' # daily at 08:00 UTC (adjust as needed)
+
+env:
+  # Provide defaults by reading from repository secrets. You should set these in GitHub repo settings -> Secrets.
+  SPOTIFY_CLIENT_ID: ${{ secrets.SPOTIFY_CLIENT_ID }}
+  SPOTIFY_CLIENT_SECRET: ${{ secrets.SPOTIFY_CLIENT_SECRET }}
+  SPOTIFY_REFRESH_TOKEN: ${{ secrets.SPOTIFY_REFRESH_TOKEN }}
+  CSV_PATH: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vTpQ_UJBna7NvW6D6_gUk5DPOUIv5oIhYKhBt1xgqI_PBexAd-W8xYctWB0UwYiEM7crxcv8oqjK9yx/pub?gid=189691109&single=true&output=csv'
+
+jobs:
+  update-playlists:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; else pip install requests python-dotenv; fi
+
+      - name: Run update script
+        env:
+          SPOTIFY_CLIENT_ID: ${{ env.SPOTIFY_CLIENT_ID }}
+          SPOTIFY_CLIENT_SECRET: ${{ env.SPOTIFY_CLIENT_SECRET }}
+          SPOTIFY_REFRESH_TOKEN: ${{ env.SPOTIFY_REFRESH_TOKEN }}
+          CSV_PATH: ${{ github.event.inputs.csv_path || env.CSV_PATH }}
+          PLAYLIST_ONE_ID: '5TGXCfKbeG0emEZjm6hMRJ'
+          PLAYLIST_TWO_ID: '5vQfOSbBgybQkWSSrILyr9'
+        run: |
+          python scripts/update_playlists.py
