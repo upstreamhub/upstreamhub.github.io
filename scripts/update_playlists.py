@@ -49,7 +49,8 @@ REFRESH_TOKEN = os.getenv("SPOTIFY_REFRESH_TOKEN")
 # Optional: user can supply a ready-made short-lived access token (must have playlist-modify scopes)
 ACCESS_TOKEN_ENV = os.getenv("SPOTIFY_ACCESS_TOKEN")
 
-CSV_PATH = os.getenv("CSV_PATH", "tracks.csv")
+# Always read CSV from the published Google Sheets CSV (ignore any local tracks.csv)
+CSV_PATH = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTpQ_UJBna7NvW6D6_gUk5DPOUIv5oIhYKhBt1xgqI_PBexAd-W8xYctWB0UwYiEM7crxcv8oqjK9yx/pub?gid=189691109&single=true&output=csv"
 PLAYLIST_ONE_ID = os.getenv("PLAYLIST_ONE_ID", "5TGXCfKbeG0emEZjm6hMRJ")  # max 3 per artist
 PLAYLIST_TWO_ID = os.getenv("PLAYLIST_TWO_ID", "5vQfOSbBgybQkWSSrILyr9")  # max 1 per artist
 
@@ -209,8 +210,8 @@ def extract_track_id_from_url(url: str) -> Optional[str]:
     m = re.match(r"spotify:track:([A-Za-z0-9]+)", url)
     if m:
         return m.group(1)
-    # https://open.spotify.com/track/{id}
-    m = re.search(r"open.spotify.com/track/([A-Za-z0-9]+)", url)
+    # https://open.spotify.com/.../track/{id} (allow optional locale segment like /intl-de/)
+    m = re.search(r"open\.spotify\.com(?:/[^/]+)?/track/([A-Za-z0-9]+)", url)
     if m:
         return m.group(1)
     # possible plain id (22 chars)
@@ -325,6 +326,16 @@ def resolve_row_to_uri(access_token: str, row: Dict[str, str]) -> Optional[str]:
     return None
 
 
+def contains_chinese(text: Optional[str]) -> bool:
+    """
+    Return True if the given text contains any CJK/Chinese characters.
+    Uses Unicode ranges for common CJK blocks.
+    """
+    if not text:
+        return False
+    return bool(re.search(r'[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]', text))
+
+
 def partition_by_artist_limit(uris: List[str], access_token: str, max_per_artist: int) -> List[str]:
     """
     Given list of track URIs in order, enforce max_per_artist by resolving track->artist (first artist)
@@ -393,37 +404,145 @@ def main():
     access_token = get_access_token()
     rows = read_csv(CSV_PATH)
 
-    # Resolve all rows to URIs preserving order
-    resolved_uris = []
+    # We'll route tracks based on whether the title contains Chinese characters.
+    resolved_chinese_uris: List[str] = []
+    resolved_non_chinese_uris: List[str] = []
+    unresolved = []
+
+    def select_title_from_row(row: Dict[str, str]) -> str:
+        """
+        Choose the best title to use for language detection.
+
+        Preference order:
+          1) 'title' or 'name' keys (these are lowercased by read_csv)
+          2) any value that contains Chinese characters (prefer actual CJK content)
+          3) any key that contains 'title', 'name', '標題', '歌名', etc.
+          4) first non-empty, non-URL, non-timestamp field (avoid picking timestamp or URL fields)
+        """
+        # 1) explicit preferred keys
+        for k in ("title", "name"):
+            v = row.get(k)
+            if v and v.strip():
+                return v.strip()
+
+        # 2) prefer any value that contains Chinese characters
+        for v in row.values():
+            if v and contains_chinese(v):
+                return v.strip()
+
+        # 3) heuristic: look for header names that imply title
+        for k, v in row.items():
+            if not v:
+                continue
+            lk = k.lower()
+            if any(term in lk for term in ("title", "name", "標題", "歌名", "歌曲", "song")):
+                return v.strip()
+
+        # 4) fallback: first non-empty value that isn't a spotify url/uri or a timestamp
+        timestamp_re = re.compile(r"\d{1,2}/\d{1,2}/\d{2,4}")
+        for k, v in row.items():
+            if not v:
+                continue
+            if normalize_to_uri(v):
+                continue
+            if timestamp_re.search(v):
+                continue
+            val = v.strip()
+            if not val:
+                continue
+            return val
+
+        return ""
+
+    # First, resolve all rows to URIs preserving order.
+    resolved_entries = []  # list of (uri, row_index, row)
     unresolved = []
     for idx, row in enumerate(rows):
         uri = resolve_row_to_uri(access_token, row)
         if uri:
-            resolved_uris.append(uri)
+            resolved_entries.append((uri, idx + 1, row))
         else:
             unresolved.append((idx + 1, row))
-    logger.info("Resolved %d tracks, %d unresolved", len(resolved_uris), len(unresolved))
+
+    logger.info("Resolved %d tracks, %d unresolved", len(resolved_entries), len(unresolved))
     if unresolved:
         logger.info("Unresolved rows (first 10 shown): %s", unresolved[:10])
 
-    # Remove duplicates while preserving order
+    # Deduplicate URIs while preserving CSV order
     seen = set()
     unique_uris = []
-    for u in resolved_uris:
-        if u not in seen:
-            unique_uris.append(u)
-            seen.add(u)
+    for uri, _, _ in resolved_entries:
+        if uri not in seen:
+            unique_uris.append(uri)
+            seen.add(uri)
 
-    # Build per-playlist lists with artist caps
-    playlist1_uris = partition_by_artist_limit(unique_uris, access_token, max_per_artist=3)
-    playlist2_uris = partition_by_artist_limit(unique_uris, access_token, max_per_artist=1)
+    # Fetch track metadata (name) in batches so we can classify by actual track name
+    uri_to_name = {}
+    headers = {"Authorization": f"Bearer {access_token}", **HEADERS}
+    def chunks(lst, n):
+        for i in range(0, len(lst), n):
+            yield lst[i:i+n]
+
+    for chunk in chunks(unique_uris, 50):
+        ids = ",".join([u.split(":")[-1] for u in chunk])
+        url = f"{SPOTIFY_API_BASE}/tracks?ids={ids}"
+        resp = requests.get(url, headers=headers, timeout=30)
+        if resp.status_code != 200:
+            logger.warning("Failed to fetch track metadata for classification: %s %s", resp.status_code, resp.text)
+            # If metadata fetch fails for this chunk, we will not classify by name for these tracks.
+            continue
+        items = resp.json().get("tracks", [])
+        for item in items:
+            if not item:
+                continue
+            uri = item.get("uri")
+            name = item.get("name") or ""
+            uri_to_name[uri] = name
+
+    # Now classify resolved entries using track metadata where available; fall back to CSV title heuristic.
+    resolved_chinese_uris = []
+    resolved_non_chinese_uris = []
+    for uri, idx, row in resolved_entries:
+        track_name = uri_to_name.get(uri) or select_title_from_row(row)
+        is_chinese = contains_chinese(track_name)
+        if is_chinese:
+            resolved_chinese_uris.append(uri)
+        else:
+            resolved_non_chinese_uris.append(uri)
+
+    logger.info(
+        "Classified %d chinese-title tracks, %d non-chinese-title tracks (based on track metadata where available)",
+        len(resolved_chinese_uris),
+        len(resolved_non_chinese_uris),
+    )
+
+    # Remove duplicates while preserving order, per-playlist
+    def unique_preserve_order(lst: List[str]) -> List[str]:
+        seen = set()
+        out = []
+        for u in lst:
+            if u not in seen:
+                out.append(u)
+                seen.add(u)
+        return out
+
+    chinese_unique = unique_preserve_order(resolved_chinese_uris)
+    non_chinese_unique = unique_preserve_order(resolved_non_chinese_uris)
+
+    # Ensure a track that appears in the Chinese list isn't duplicated into the non-Chinese list
+    chinese_set = set(chinese_unique)
+    non_chinese_unique = [u for u in non_chinese_unique if u not in chinese_set]
+
+    # Apply artist limits: Chinese-title songs -> playlist 1 (max 3 per artist),
+    # Non-Chinese-title songs -> playlist 2 (max 1 per artist)
+    playlist1_uris = partition_by_artist_limit(chinese_unique, access_token, max_per_artist=3)
+    playlist2_uris = partition_by_artist_limit(non_chinese_unique, access_token, max_per_artist=1)
 
     # Randomize order in each playlist as requested
     try:
         random.shuffle(playlist1_uris)
         random.shuffle(playlist2_uris)
     except Exception:
-        # If shuffle fails for any reason, fall back to original ordering
         logger.warning("Randomization failed; proceeding with original ordering.")
 
     logger.info("Final counts -> Playlist1: %d tracks, Playlist2: %d tracks", len(playlist1_uris), len(playlist2_uris))
