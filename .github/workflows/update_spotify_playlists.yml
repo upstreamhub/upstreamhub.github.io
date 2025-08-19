@@ -10,11 +10,12 @@ on:
     - cron: '0 8 * * *' # daily at 08:00 UTC (adjust as needed)
 
 env:
-  # Provide defaults by reading from repository secrets. You should set these in GitHub repo settings -> Secrets.
-  SPOTIFY_CLIENT_ID: ${{ secrets.SPOTIFY_CLIENT_ID }}
-  SPOTIFY_CLIENT_SECRET: ${{ secrets.SPOTIFY_CLIENT_SECRET }}
-  SPOTIFY_REFRESH_TOKEN: ${{ secrets.SPOTIFY_REFRESH_TOKEN }}
-  CSV_PATH: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vTpQ_UJBna7NvW6D6_gUk5DPOUIv5oIhYKhBt1xgqI_PBexAd-W8xYctWB0UwYiEM7crxcv8oqjK9yx/pub?gid=189691109&single=true&output=csv'
+  # Prefer repository Secrets for sensitive values; fall back to Repository Variables (vars) if secrets are not set.
+  # This allows flexibility: set sensitive values in Secrets, and non-sensitive defaults in Variables.
+  SPOTIFY_CLIENT_ID: ${{ secrets.SPOTIFY_CLIENT_ID || vars.SPOTIFY_CLIENT_ID }}
+  SPOTIFY_CLIENT_SECRET: ${{ secrets.SPOTIFY_CLIENT_SECRET || vars.SPOTIFY_CLIENT_SECRET }}
+  SPOTIFY_REFRESH_TOKEN: ${{ secrets.SPOTIFY_REFRESH_TOKEN || vars.SPOTIFY_REFRESH_TOKEN }}
+  CSV_PATH: ${{ vars.CSV_PATH || 'https://docs.google.com/spreadsheets/d/e/2PACX-1vTpQ_UJBna7NvW6D6_gUk5DPOUIv5oIhYKhBt1xgqI_PBexAd-W8xYctWB0UwYiEM7crxcv8oqjK9yx/pub?gid=189691109&single=true&output=csv' }}
 
 jobs:
   update-playlists:

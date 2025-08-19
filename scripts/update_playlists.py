@@ -108,6 +108,17 @@ def get_access_token() -> str:
     # HTTPS redirect and ask the user to paste the "code" parameter from the browser's redirected URL. This works
     # when you have control of the app's Redirect URIs (you showed https://upstreamhub.github.io/ is registered).
     if CLIENT_ID and CLIENT_SECRET:
+        # In CI environments (for example GitHub Actions) interactive authorization is not available.
+        # Detect CI and abort early with a clear error instead of attempting to open a browser or read stdin,
+        # which would cause the workflow to hang.
+        if os.getenv("GITHUB_ACTIONS") or os.getenv("CI"):
+            logger.error(
+                "Running in CI (GITHUB_ACTIONS/CI detected) and no valid SPOTIFY_REFRESH_TOKEN or SPOTIFY_ACCESS_TOKEN is available."
+            )
+            logger.error(
+                "Set SPOTIFY_REFRESH_TOKEN or SPOTIFY_ACCESS_TOKEN in your repository's Secrets and re-run the workflow."
+            )
+            raise SystemExit(2)
         logger.info("No valid refresh token; initiating interactive authorization using a registered HTTPS redirect.")
         try:
             import webbrowser
