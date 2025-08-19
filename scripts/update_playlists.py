@@ -28,6 +28,7 @@ import time
 import logging
 import requests
 import csv
+import random
 from urllib.parse import quote_plus
 from typing import Optional, List, Dict
 from dotenv import load_dotenv
@@ -416,6 +417,14 @@ def main():
     # Build per-playlist lists with artist caps
     playlist1_uris = partition_by_artist_limit(unique_uris, access_token, max_per_artist=3)
     playlist2_uris = partition_by_artist_limit(unique_uris, access_token, max_per_artist=1)
+
+    # Randomize order in each playlist as requested
+    try:
+        random.shuffle(playlist1_uris)
+        random.shuffle(playlist2_uris)
+    except Exception:
+        # If shuffle fails for any reason, fall back to original ordering
+        logger.warning("Randomization failed; proceeding with original ordering.")
 
     logger.info("Final counts -> Playlist1: %d tracks, Playlist2: %d tracks", len(playlist1_uris), len(playlist2_uris))
 
